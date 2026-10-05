@@ -1,0 +1,26 @@
+# Example: docmost-community-mcp in HTTP mode behind a reverse proxy on the same host.
+# Copy next to a .env file (mode 600) that holds the variables from .env.example.
+services:
+  docmost-mcp:
+    # Build from a pinned commit or tag of the repository, for example:
+    # build: https://github.com/<owner>/docmost-community-mcp.git#<commit-or-tag>
+    build:
+      context: ..
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MCP_TRANSPORT: http
+      MCP_HTTP_HOST: 0.0.0.0
+      MCP_HTTP_PORT: "3001"
+    ports:
+      # Loopback only: the reverse proxy is the single way in.
+      - "127.0.0.1:3001:3001"
+    read_only: true
+    tmpfs:
+      - /tmp
+      # Docmost session cache; lost on restart, the server logs in again.
+      - /home/node/.docmost-community-mcp:uid=1000,gid=1000,mode=0700
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true

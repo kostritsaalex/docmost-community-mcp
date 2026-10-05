@@ -99,9 +99,59 @@ Same `mcpServers` block as above. Claude Code:
 claude mcp add docmost --env DOCMOST_URL=https://docs.example.com --env DOCMOST_EMAIL=you@example.com --env DOCMOST_PASSWORD=secret -- npx -y docmost-community-mcp
 ```
 
+## HTTP mode (remote hosting)
+
+By default the server speaks MCP over stdio. Set `MCP_TRANSPORT=http` to run one shared instance that many clients reach over the network. One process keeps one Docmost login and serves every MCP session.
+
+Both MCP transports are served, so clients connect without a bridge such as `mcp-remote`:
+
+| Path | Transport | Typical clients |
+|---|---|---|
+| `/<secret>/mcp` | Streamable HTTP (POST, GET, DELETE) | Current CLIs and IDEs |
+| `/<secret>/sse` and `/<secret>/messages` | Legacy HTTP+SSE | Connectors that only speak SSE |
+| `/healthz` | Liveness check, returns `ok` | Docker, monitoring |
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MCP_TRANSPORT` | `stdio` | `stdio` or `http` |
+| `MCP_PATH_SECRET` | none, required | Secret first path segment, at least 32 characters of `A-Z a-z 0-9 - _`. Generate with `openssl rand -hex 32` |
+| `MCP_ALLOWED_HOSTS` | none | Comma-separated host names accepted in the `Host` header. Set it to the public name |
+| `MCP_HTTP_HOST` | `127.0.0.1` | Bind address (`0.0.0.0` inside a container) |
+| `MCP_HTTP_PORT` | `3001` | Listen port |
+| `MCP_SESSION_IDLE_MINUTES` | `30` | Streamable HTTP sessions with no traffic for this long are closed; the client starts a new one |
+
+The client URL is `https://mcp.example.com/<secret>/mcp`, or `https://mcp.example.com/<secret>/sse` for SSE-only clients.
+
+### Security model
+
+- **The URL is the credential.** Anyone who has it acts as the configured Docmost user. Treat it like a password, and rotate the secret if it leaks.
+- Any path without the right secret gets an empty `404`, so a scan cannot tell the server is there. The secret is compared in constant time and never logged.
+- With `MCP_ALLOWED_HOSTS` set, a request with any other `Host` header gets `403` (DNS rebinding protection).
+- Docmost credentials come only from the server environment. Use a dedicated member account, not the workspace owner. `DOCMOST_READ_ONLY=true` gives read-only access.
+- `export_page`, `export_space` and `upload_attachment` are **not offered in HTTP mode**. They read or write files on the machine running the server, which for a shared server is not the caller's computer and holds the credentials.
+- Terminate TLS in a reverse proxy and publish the port on loopback only. Keep proxy access logs off for this site, or strip the path, because the path carries the secret.
+
+### Docker
+
+`Dockerfile` builds an HTTP-mode image that runs as the `node` user. `deploy/compose.example.yaml` runs it with a read-only root filesystem, the port on `127.0.0.1` only, and settings from a `.env` file:
+
+```bash
+cp .env.example deploy/.env    # fill in DOCMOST_*, MCP_PATH_SECRET, MCP_ALLOWED_HOSTS
+chmod 600 deploy/.env
+docker compose -f deploy/compose.example.yaml up -d --build
+```
+
+Caddy in front of it:
+
+```caddy
+mcp.example.com {
+	reverse_proxy 127.0.0.1:3001
+}
+```
+
 ## Design notes
 
-- **stdio only** in this release. Streamable HTTP can be added later.
+- **stdio by default**, with an optional HTTP mode (Streamable HTTP and legacy SSE) for shared hosting.
 - **No Enterprise license, no Docmost database access, no Docmost fork.**
 - Space slugs are accepted anywhere a space id is required.
 - `move_page` computes the required fractional `position` key (`first`, `last`, or after a sibling).

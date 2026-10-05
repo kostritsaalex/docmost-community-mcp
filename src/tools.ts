@@ -49,18 +49,36 @@ function wrap(
   };
 }
 
-export function registerTools(server: McpServer, client: DocmostClient): void {
-  registerPageTools(server, client);
-  registerSpaceTools(server, client);
+export type ToolOptions = {
+  /**
+   * Register tools that read or write files on the machine running this server
+   * (export_page, export_space, upload_attachment). Off in HTTP mode, where that
+   * machine is a shared server and not the caller's computer.
+   */
+  localFileTools?: boolean;
+};
+
+export function registerTools(
+  server: McpServer,
+  client: DocmostClient,
+  options: ToolOptions = {},
+): void {
+  const localFiles = options.localFileTools ?? true;
+  registerPageTools(server, client, localFiles);
+  registerSpaceTools(server, client, localFiles);
   registerCommentTools(server, client);
   registerSearchTools(server, client);
   registerWorkspaceTools(server, client);
-  registerAttachmentTools(server, client);
+  registerAttachmentTools(server, client, localFiles);
   registerLabelTools(server, client);
   registerMemberTools(server, client);
 }
 
-function registerPageTools(server: McpServer, client: DocmostClient): void {
+function registerPageTools(
+  server: McpServer,
+  client: DocmostClient,
+  localFiles: boolean,
+): void {
   server.registerTool(
     "search_pages",
     {
@@ -483,6 +501,10 @@ function registerPageTools(server: McpServer, client: DocmostClient): void {
     ),
   );
 
+  if (!localFiles) {
+    return;
+  }
+
   server.registerTool(
     "export_page",
     {
@@ -508,7 +530,11 @@ function registerPageTools(server: McpServer, client: DocmostClient): void {
   );
 }
 
-function registerSpaceTools(server: McpServer, client: DocmostClient): void {
+function registerSpaceTools(
+  server: McpServer,
+  client: DocmostClient,
+  localFiles: boolean,
+): void {
   server.registerTool(
     "list_spaces",
     {
@@ -605,6 +631,10 @@ function registerSpaceTools(server: McpServer, client: DocmostClient): void {
       return { spaceId: id, deleted: true };
     }),
   );
+
+  if (!localFiles) {
+    return;
+  }
 
   server.registerTool(
     "export_space",
@@ -821,19 +851,25 @@ function registerWorkspaceTools(server: McpServer, client: DocmostClient): void 
   );
 }
 
-function registerAttachmentTools(server: McpServer, client: DocmostClient): void {
-  server.registerTool(
-    "upload_attachment",
-    {
-      description: "Upload a local file to a page. Returns attachment metadata including the /api/files/:id/:name URL path.",
-      annotations: hints("write"),
-      inputSchema: {
-        page_id: pageId,
-        file_path: z.string().min(1).describe("Absolute path to a local file"),
+function registerAttachmentTools(
+  server: McpServer,
+  client: DocmostClient,
+  localFiles: boolean,
+): void {
+  if (localFiles) {
+    server.registerTool(
+      "upload_attachment",
+      {
+        description: "Upload a local file to a page. Returns attachment metadata including the /api/files/:id/:name URL path.",
+        annotations: hints("write"),
+        inputSchema: {
+          page_id: pageId,
+          file_path: z.string().min(1).describe("Absolute path to a local file"),
+        },
       },
-    },
-    wrap(client, "write", async (args) => client.uploadFile(String(args.page_id), String(args.file_path))),
-  );
+      wrap(client, "write", async (args) => client.uploadFile(String(args.page_id), String(args.file_path))),
+    );
+  }
 
   server.registerTool(
     "get_attachment_info",
