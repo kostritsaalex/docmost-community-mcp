@@ -174,6 +174,11 @@ mcp.example.com {
 }
 ```
 
+## Safer page writes
+
+- `update_page` with `markdown` requires `operation` (`replace`, `append` or `prepend`). There is no default: a missing operation used to mean `replace`, which silently overwrote the whole page. Title or icon changes without a body need no operation. The rule applies in stdio and HTTP mode.
+- Every tool that takes a page id (`page_id`, `parent_page_id`, `after_page_id`) accepts a UUID or a slugId. A slugId is resolved to the UUID with one `/pages/info` call before the endpoint is called, because some Docmost endpoints answer a slugId with a 500 or a misleading 400.
+
 ## Design notes
 
 - **stdio by default**, with an optional HTTP mode (Streamable HTTP and legacy SSE) for shared hosting.

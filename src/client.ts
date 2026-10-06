@@ -258,6 +258,19 @@ export class DocmostClient {
     }
   }
 
+  /** A page UUID is returned as is; a slugId is looked up once through /pages/info. */
+  async resolvePageId(pageIdOrSlug: string): Promise<string> {
+    if (isUuid(pageIdOrSlug)) {
+      return pageIdOrSlug;
+    }
+    const page = (await this.request("/pages/info", { pageId: pageIdOrSlug })) as Json | undefined;
+    const id = page && typeof page.id === "string" ? page.id : undefined;
+    if (!id) {
+      throw new DocmostError(`Page not found for slugId ${pageIdOrSlug}`);
+    }
+    return id;
+  }
+
   async resolveSpaceId(spaceIdOrSlug: string): Promise<string> {
     if (isUuid(spaceIdOrSlug)) {
       return spaceIdOrSlug;

@@ -22,3 +22,10 @@ export class VersionError extends Error {
     this.name = "VersionError";
   }
 }
+
+export class InputError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InputError";
+  }
+}

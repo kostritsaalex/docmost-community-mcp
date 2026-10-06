@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { ClientRegistry } from "./actors.js";
 import type { DocmostClient } from "./client.js";
 import { DocmostError, VersionError } from "./errors.js";
+import { requireBodyOperation, resolvePageIds } from "./guards.js";
 import {
   asItems,
   errorResult,
@@ -18,7 +19,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 
-const pageId = z.string().min(1).describe("Page UUID or slugId");
+const pageId = z.string().min(1).describe("Page UUID or slugId (a slugId is resolved to the UUID)");
 const spaceId = z.string().min(1).describe("Space UUID or slug");
 const limit = z.number().int().min(1).max(100).optional().describe("Page size, 1-100");
 const cursor = z.string().optional().describe("Pagination cursor from meta.nextCursor");
@@ -46,7 +47,9 @@ function wrap(
       if (kind !== "read") {
         client.assertMutable();
       }
-      return textResult(await fn(rest, client));
+      // Some endpoints answer a slugId with 500 or 400, so page ids are resolved here once.
+      const resolved = await resolvePageIds(rest, (slugId) => client.resolvePageId(slugId));
+      return textResult(await fn(resolved, client));
     } catch (error) {
       return errorResult(error);
     }
@@ -245,7 +248,8 @@ function registerPageTools(
   server.registerTool(
     "update_page",
     {
-      description: "Update a page title, icon, and/or Markdown body in place. Body writes use the server converter (v0.71+). operation defaults to replace.",
+      description:
+        "Update a page title, icon, and/or Markdown body in place. Body writes use the server converter (v0.71+). With markdown, operation is required: append or prepend adds to the page, replace sends the whole body.",
       annotations: hints("write"),
       inputSchema: {
         page_id: pageId,
@@ -255,10 +259,11 @@ function registerPageTools(
         operation: z
           .enum(["replace", "append", "prepend"])
           .optional()
-          .describe("How to apply markdown. Default replace"),
+          .describe("How to apply markdown; required when markdown is given. No default"),
       },
     },
     wrap(registry, "write", async (args, client) => {
+      requireBodyOperation(args);
       if (args.markdown) {
         await client.assertWritable();
       }
@@ -270,7 +275,7 @@ function registerPageTools(
           ? {
               content: args.markdown,
               format: "markdown",
-              operation: args.operation ?? "replace",
+              operation: args.operation,
             }
           : {}),
       });
