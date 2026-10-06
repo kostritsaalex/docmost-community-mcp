@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 import { ConfigError } from "./errors.js";
 
 export type DocmostConfig = {
@@ -125,4 +125,67 @@ export function loadHttpConfig(env: Env = process.env): HttpConfig {
     sessionIdleMs:
       optionalInteger("MCP_SESSION_IDLE_MINUTES", 30, 1, 1440, env) * 60_000,
   };
+}
+
+const ACTOR_NAME_PATTERN = /^[a-z][a-z0-9-]*$/;
+
+function actorVariable(name: string, suffix: "EMAIL" | "PASSWORD"): string {
+  return `DOCMOST_ACTOR_${name.toUpperCase().replace(/-/g, "_")}_${suffix}`;
+}
+
+function actorSessionPath(sessionPath: string, name: string): string {
+  const { dir, name: stem, ext } = parse(sessionPath);
+  return join(dir, `${stem}.${name}${ext || ".json"}`);
+}
+
+/**
+ * Named actors from DOCMOST_ACTORS (comma list) with DOCMOST_ACTOR_<NAME>_EMAIL and
+ * DOCMOST_ACTOR_<NAME>_PASSWORD each. Returns an empty map when DOCMOST_ACTORS is unset.
+ * Error messages name variables, never their values.
+ */
+export function loadActorConfigs(
+  base: DocmostConfig,
+  env: Env = process.env,
+): Map<string, DocmostConfig> {
+  const actors = new Map<string, DocmostConfig>();
+  const raw = optional("DOCMOST_ACTORS", env);
+  if (!raw) {
+    return actors;
+  }
+
+  // Validate every name first, so a typo is reported before missing credentials.
+  const names: string[] = [];
+  for (const entry of raw.split(",")) {
+    const name = entry.trim().toLowerCase();
+    if (!name) {
+      continue;
+    }
+    if (!ACTOR_NAME_PATTERN.test(name)) {
+      throw new ConfigError(
+        `DOCMOST_ACTORS: "${name}" is not a valid actor name (lowercase letters, digits and '-', starting with a letter)`,
+      );
+    }
+    if (names.includes(name)) {
+      throw new ConfigError(`DOCMOST_ACTORS lists "${name}" twice`);
+    }
+    names.push(name);
+  }
+
+  for (const name of names) {
+    const email = optional(actorVariable(name, "EMAIL"), env);
+    const password = optional(actorVariable(name, "PASSWORD"), env);
+    if (!email || !password) {
+      throw new ConfigError(
+        `Actor "${name}" needs ${actorVariable(name, "EMAIL")} and ${actorVariable(name, "PASSWORD")}`,
+      );
+    }
+    actors.set(name, {
+      baseUrl: base.baseUrl,
+      email,
+      password,
+      sessionPath: actorSessionPath(base.sessionPath, name),
+      readOnly: base.readOnly,
+    });
+  }
+  return actors;
 }

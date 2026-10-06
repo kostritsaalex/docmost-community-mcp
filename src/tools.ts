@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import type { ClientRegistry } from "./actors.js";
 import type { DocmostClient } from "./client.js";
 import { DocmostError, VersionError } from "./errors.js";
 import {
@@ -33,20 +34,64 @@ function hints(kind: ToolKind) {
 }
 
 function wrap(
-  client: DocmostClient,
+  registry: ClientRegistry,
   kind: ToolKind,
-  fn: (args: Record<string, unknown>) => Promise<unknown>,
+  fn: (args: Record<string, unknown>, client: DocmostClient) => Promise<unknown>,
 ) {
   return async (args: Record<string, unknown>) => {
     try {
+      // Reads use the default account. Writes run as the named actor, if any are defined.
+      const { actor, ...rest } = args;
+      const client = kind === "read" ? registry.reader : registry.forWrite(actor);
       if (kind !== "read") {
         client.assertMutable();
       }
-      return textResult(await fn(args));
+      return textResult(await fn(rest, client));
     } catch (error) {
       return errorResult(error);
     }
   };
+}
+
+type ToolConfig = {
+  annotations?: { readOnlyHint?: boolean };
+  inputSchema?: Record<string, unknown>;
+};
+
+/**
+ * When actors are defined, every write or destructive tool gets a required `actor`
+ * input whose allowed values are the actor names, so agents see them in the schema
+ * and the SDK rejects anything else before the handler runs.
+ */
+function withActorParameter(server: McpServer, actorNames: readonly string[]): McpServer {
+  if (actorNames.length === 0) {
+    return server;
+  }
+  const actor = z
+    .enum(actorNames as [string, ...string[]])
+    .describe(
+      "Who is writing: your own model name, as your harness shows it. The change is recorded in Docmost under this account.",
+    );
+  const register = server.registerTool.bind(server) as (
+    name: string,
+    config: ToolConfig,
+    callback: unknown,
+  ) => unknown;
+  return new Proxy(server, {
+    get(target, property, receiver) {
+      if (property !== "registerTool") {
+        return Reflect.get(target, property, receiver);
+      }
+      return (name: string, config: ToolConfig, callback: unknown) =>
+        register(
+          name,
+          config.annotations?.readOnlyHint === false
+            ? { ...config, inputSchema: { ...(config.inputSchema ?? {}), actor } }
+            : config,
+          callback,
+        );
+    },
+  });
 }
 
 export type ToolOptions = {
@@ -60,23 +105,24 @@ export type ToolOptions = {
 
 export function registerTools(
   server: McpServer,
-  client: DocmostClient,
+  registry: ClientRegistry,
   options: ToolOptions = {},
 ): void {
   const localFiles = options.localFileTools ?? true;
-  registerPageTools(server, client, localFiles);
-  registerSpaceTools(server, client, localFiles);
-  registerCommentTools(server, client);
-  registerSearchTools(server, client);
-  registerWorkspaceTools(server, client);
-  registerAttachmentTools(server, client, localFiles);
-  registerLabelTools(server, client);
-  registerMemberTools(server, client);
+  const target = withActorParameter(server, registry.actorNames);
+  registerPageTools(target, registry, localFiles);
+  registerSpaceTools(target, registry, localFiles);
+  registerCommentTools(target, registry);
+  registerSearchTools(target, registry);
+  registerWorkspaceTools(target, registry);
+  registerAttachmentTools(target, registry, localFiles);
+  registerLabelTools(target, registry);
+  registerMemberTools(target, registry);
 }
 
 function registerPageTools(
   server: McpServer,
-  client: DocmostClient,
+  registry: ClientRegistry,
   localFiles: boolean,
 ): void {
   server.registerTool(
@@ -91,7 +137,7 @@ function registerPageTools(
         offset: z.number().int().min(0).optional().describe("Result offset"),
       },
     },
-    wrap(client, "read", async (args) => {
+    wrap(registry, "read", async (args, client) => {
       const spaceIdValue = args.space_id
         ? await client.resolveSpaceId(String(args.space_id))
         : undefined;
@@ -132,7 +178,7 @@ function registerPageTools(
         format: z.enum(["markdown", "html", "json"]).optional().describe("Content format. Default markdown"),
       },
     },
-    wrap(client, "read", async (args) => {
+    wrap(registry, "read", async (args, client) => {
       const format = (args.format as string | undefined) ?? "markdown";
       const page = (await client.request("/pages/info", {
         pageId: args.page_id,
@@ -160,7 +206,7 @@ function registerPageTools(
         icon: z.string().optional().describe("Page icon, usually an emoji"),
       },
     },
-    wrap(client, "write", async (args) => {
+    wrap(registry, "write", async (args, client) => {
       await client.assertWritable();
       const resolvedSpaceId = await client.resolveSpaceId(String(args.space_id));
       const markdown = args.markdown as string | undefined;
@@ -212,7 +258,7 @@ function registerPageTools(
           .describe("How to apply markdown. Default replace"),
       },
     },
-    wrap(client, "write", async (args) => {
+    wrap(registry, "write", async (args, client) => {
       if (args.markdown) {
         await client.assertWritable();
       }
@@ -251,7 +297,7 @@ function registerPageTools(
         cursor,
       },
     },
-    wrap(client, "read", async (args) => {
+    wrap(registry, "read", async (args, client) => {
       const resolvedSpaceId = await client.resolveSpaceId(String(args.space_id));
       const view = (args.view as string | undefined) ?? "recent";
       const result = asItems(
@@ -281,7 +327,7 @@ function registerPageTools(
         cursor,
       },
     },
-    wrap(client, "read", async (args) => {
+    wrap(registry, "read", async (args, client) => {
       if (!args.page_id && !args.space_id) {
         throw new Error("Provide page_id or space_id");
       }
@@ -309,7 +355,7 @@ function registerPageTools(
       annotations: hints("write"),
       inputSchema: { page_id: pageId },
     },
-    wrap(client, "write", async (args) => client.request("/pages/duplicate", { pageId: args.page_id })),
+    wrap(registry, "write", async (args, client) => client.request("/pages/duplicate", { pageId: args.page_id })),
   );
 
   server.registerTool(
@@ -322,7 +368,7 @@ function registerPageTools(
         space_id: spaceId.describe("Destination space"),
       },
     },
-    wrap(client, "write", async (args) =>
+    wrap(registry, "write", async (args, client) =>
       client.request("/pages/duplicate", {
         pageId: args.page_id,
         spaceId: await client.resolveSpaceId(String(args.space_id)),
@@ -351,7 +397,7 @@ function registerPageTools(
         after_page_id: z.string().optional().describe("Place after this sibling page"),
       },
     },
-    wrap(client, "write", async (args) => {
+    wrap(registry, "write", async (args, client) => {
       const parentPageId = args.root ? null : (args.parent_page_id as string | null | undefined);
       const position = await client.computeMovePosition({
         pageId: String(args.page_id),
@@ -377,7 +423,7 @@ function registerPageTools(
         space_id: spaceId.describe("Destination space"),
       },
     },
-    wrap(client, "write", async (args) =>
+    wrap(registry, "write", async (args, client) =>
       client.request("/pages/move-to-space", {
         pageId: args.page_id,
         spaceId: await client.resolveSpaceId(String(args.space_id)),
@@ -395,7 +441,7 @@ function registerPageTools(
         permanently: z.boolean().optional().describe("If true, permanently delete. Default false (trash)"),
       },
     },
-    wrap(client, "destructive", async (args) => {
+    wrap(registry, "destructive", async (args, client) => {
       await client.request("/pages/delete", {
         pageId: args.page_id,
         permanentlyDelete: Boolean(args.permanently),
@@ -415,7 +461,7 @@ function registerPageTools(
       annotations: hints("write"),
       inputSchema: { page_id: pageId },
     },
-    wrap(client, "write", async (args) => pageSummary(await client.request("/pages/restore", { pageId: args.page_id }))),
+    wrap(registry, "write", async (args, client) => pageSummary(await client.request("/pages/restore", { pageId: args.page_id }))),
   );
 
   server.registerTool(
@@ -425,7 +471,7 @@ function registerPageTools(
       annotations: hints("read"),
       inputSchema: { space_id: spaceId, limit, cursor },
     },
-    wrap(client, "read", async (args) => {
+    wrap(registry, "read", async (args, client) => {
       const result = asItems(
         await client.request("/pages/trash", {
           spaceId: await client.resolveSpaceId(String(args.space_id)),
@@ -444,7 +490,7 @@ function registerPageTools(
       annotations: hints("read"),
       inputSchema: { page_id: pageId, limit, cursor },
     },
-    wrap(client, "read", async (args) =>
+    wrap(registry, "read", async (args, client) =>
       asItems(
         await client.request("/pages/history", {
           pageId: args.page_id,
@@ -464,7 +510,7 @@ function registerPageTools(
         history_id: z.string().uuid().describe("History version UUID"),
       },
     },
-    wrap(client, "read", async (args) => client.request("/pages/history/info", { historyId: args.history_id })),
+    wrap(registry, "read", async (args, client) => client.request("/pages/history/info", { historyId: args.history_id })),
   );
 
   server.registerTool(
@@ -474,7 +520,7 @@ function registerPageTools(
       annotations: hints("read"),
       inputSchema: { page_id: pageId },
     },
-    wrap(client, "read", async (args) => client.request("/pages/breadcrumbs", { pageId: args.page_id })),
+    wrap(registry, "read", async (args, client) => client.request("/pages/breadcrumbs", { pageId: args.page_id })),
   );
 
   server.registerTool(
@@ -489,7 +535,7 @@ function registerPageTools(
         cursor,
       },
     },
-    wrap(client, "read", async (args) =>
+    wrap(registry, "read", async (args, client) =>
       asItems(
         await client.request("/pages/backlinks", {
           pageId: args.page_id,
@@ -519,7 +565,7 @@ function registerPageTools(
         output_path: z.string().optional().describe("Where to write the exported file"),
       },
     },
-    wrap(client, "read", async (args) =>
+    wrap(registry, "read", async (args, client) =>
       exportZip(client, "/pages/export", {
         pageId: args.page_id,
         format: args.format ?? "markdown",
@@ -532,7 +578,7 @@ function registerPageTools(
 
 function registerSpaceTools(
   server: McpServer,
-  client: DocmostClient,
+  registry: ClientRegistry,
   localFiles: boolean,
 ): void {
   server.registerTool(
@@ -542,7 +588,7 @@ function registerSpaceTools(
       annotations: hints("read"),
       inputSchema: { limit, cursor },
     },
-    wrap(client, "read", async (args) => {
+    wrap(registry, "read", async (args, client) => {
       const result = asItems(
         await client.request("/spaces", {
           limit: args.limit ?? 100,
@@ -563,7 +609,7 @@ function registerSpaceTools(
       annotations: hints("read"),
       inputSchema: { space_id: spaceId },
     },
-    wrap(client, "read", async (args) => {
+    wrap(registry, "read", async (args, client) => {
       const id = await client.resolveSpaceId(String(args.space_id));
       return spaceSummary(await client.request("/spaces/info", { spaceId: id }));
     }),
@@ -580,7 +626,7 @@ function registerSpaceTools(
         description: z.string().optional(),
       },
     },
-    wrap(client, "write", async (args) =>
+    wrap(registry, "write", async (args, client) =>
       spaceSummary(
         await client.request("/spaces/create", {
           name: args.name,
@@ -603,7 +649,7 @@ function registerSpaceTools(
         description: z.string().optional(),
       },
     },
-    wrap(client, "write", async (args) =>
+    wrap(registry, "write", async (args, client) =>
       spaceSummary(
         await client.request("/spaces/update", {
           spaceId: await client.resolveSpaceId(String(args.space_id)),
@@ -625,7 +671,7 @@ function registerSpaceTools(
         confirm: z.literal(true).describe("Must be true to confirm deletion"),
       },
     },
-    wrap(client, "destructive", async (args) => {
+    wrap(registry, "destructive", async (args, client) => {
       const id = await client.resolveSpaceId(String(args.space_id));
       await client.request("/spaces/delete", { spaceId: id });
       return { spaceId: id, deleted: true };
@@ -648,7 +694,7 @@ function registerSpaceTools(
         output_path: z.string().optional(),
       },
     },
-    wrap(client, "read", async (args) => {
+    wrap(registry, "read", async (args, client) => {
       const id = await client.resolveSpaceId(String(args.space_id));
       return exportZip(
         client,
@@ -665,7 +711,7 @@ function registerSpaceTools(
   );
 }
 
-function registerCommentTools(server: McpServer, client: DocmostClient): void {
+function registerCommentTools(server: McpServer, registry: ClientRegistry): void {
   server.registerTool(
     "get_comments",
     {
@@ -674,7 +720,7 @@ function registerCommentTools(server: McpServer, client: DocmostClient): void {
       annotations: hints("read"),
       inputSchema: { page_id: pageId, limit, cursor },
     },
-    wrap(client, "read", async (args) => {
+    wrap(registry, "read", async (args, client) => {
       const result = asItems(
         await client.request("/comments", {
           pageId: args.page_id,
@@ -703,7 +749,7 @@ function registerCommentTools(server: McpServer, client: DocmostClient): void {
         parent_comment_id: z.string().uuid().optional().describe("Parent comment UUID to reply"),
       },
     },
-    wrap(client, "write", async (args) =>
+    wrap(registry, "write", async (args, client) =>
       commentSummary(
         await client.request("/comments/create", {
           pageId: args.page_id,
@@ -725,7 +771,7 @@ function registerCommentTools(server: McpServer, client: DocmostClient): void {
         markdown: z.string().min(1),
       },
     },
-    wrap(client, "write", async (args) =>
+    wrap(registry, "write", async (args, client) =>
       commentSummary(
         await client.request("/comments/update", {
           commentId: args.comment_id,
@@ -742,14 +788,14 @@ function registerCommentTools(server: McpServer, client: DocmostClient): void {
       annotations: hints("destructive"),
       inputSchema: { comment_id: z.string().uuid() },
     },
-    wrap(client, "destructive", async (args) => {
+    wrap(registry, "destructive", async (args, client) => {
       await client.request("/comments/delete", { commentId: args.comment_id });
       return { commentId: args.comment_id, deleted: true };
     }),
   );
 }
 
-function registerSearchTools(server: McpServer, client: DocmostClient): void {
+function registerSearchTools(server: McpServer, registry: ClientRegistry): void {
   server.registerTool(
     "search_attachments",
     {
@@ -762,7 +808,7 @@ function registerSearchTools(server: McpServer, client: DocmostClient): void {
         limit,
       },
     },
-    wrap(client, "read", async (args) => {
+    wrap(registry, "read", async (args, client) => {
       const spaceIdValue = args.space_id
         ? await client.resolveSpaceId(String(args.space_id))
         : undefined;
@@ -798,7 +844,7 @@ function registerSearchTools(server: McpServer, client: DocmostClient): void {
         limit,
       },
     },
-    wrap(client, "read", async (args) =>
+    wrap(registry, "read", async (args, client) =>
       client.request("/search/suggest", {
         query: args.query,
         spaceId: args.space_id
@@ -813,7 +859,7 @@ function registerSearchTools(server: McpServer, client: DocmostClient): void {
   );
 }
 
-function registerWorkspaceTools(server: McpServer, client: DocmostClient): void {
+function registerWorkspaceTools(server: McpServer, registry: ClientRegistry): void {
   server.registerTool(
     "get_current_user",
     {
@@ -821,7 +867,7 @@ function registerWorkspaceTools(server: McpServer, client: DocmostClient): void 
         "Get the authenticated user and workspace context, detected Docmost version, and whether this session is read-only.",
       annotations: hints("read"),
     },
-    wrap(client, "read", async () => {
+    wrap(registry, "read", async (_args, client) => {
       const me = (await client.request("/users/me", {})) as Json;
       const probe = await client.sessionInfo();
       return { ...me, ...probe };
@@ -839,7 +885,7 @@ function registerWorkspaceTools(server: McpServer, client: DocmostClient): void 
         query: z.string().optional().describe("Optional member search text"),
       },
     },
-    wrap(client, "read", async (args) =>
+    wrap(registry, "read", async (args, client) =>
       asItems(
         await client.request("/workspace/members", {
           limit: args.limit ?? 50,
@@ -853,7 +899,7 @@ function registerWorkspaceTools(server: McpServer, client: DocmostClient): void 
 
 function registerAttachmentTools(
   server: McpServer,
-  client: DocmostClient,
+  registry: ClientRegistry,
   localFiles: boolean,
 ): void {
   if (localFiles) {
@@ -867,7 +913,7 @@ function registerAttachmentTools(
           file_path: z.string().min(1).describe("Absolute path to a local file"),
         },
       },
-      wrap(client, "write", async (args) => client.uploadFile(String(args.page_id), String(args.file_path))),
+      wrap(registry, "write", async (args, client) => client.uploadFile(String(args.page_id), String(args.file_path))),
     );
   }
 
@@ -880,11 +926,11 @@ function registerAttachmentTools(
         attachment_id: z.string().uuid(),
       },
     },
-    wrap(client, "read", async (args) => client.request("/files/info", { attachmentId: args.attachment_id })),
+    wrap(registry, "read", async (args, client) => client.request("/files/info", { attachmentId: args.attachment_id })),
   );
 }
 
-function registerLabelTools(server: McpServer, client: DocmostClient): void {
+function registerLabelTools(server: McpServer, registry: ClientRegistry): void {
   server.registerTool(
     "list_page_labels",
     {
@@ -892,7 +938,7 @@ function registerLabelTools(server: McpServer, client: DocmostClient): void {
       annotations: hints("read"),
       inputSchema: { page_id: pageId, limit, cursor },
     },
-    wrap(client, "read", async (args) =>
+    wrap(registry, "read", async (args, client) =>
       asItems(
         await client.request("/pages/labels", {
           pageId: args.page_id,
@@ -913,7 +959,7 @@ function registerLabelTools(server: McpServer, client: DocmostClient): void {
         names: z.array(z.string().min(1)).min(1).max(25),
       },
     },
-    wrap(client, "write", async (args) =>
+    wrap(registry, "write", async (args, client) =>
       client.request("/pages/labels/add", {
         pageId: args.page_id,
         names: (args.names as string[]).map(normalizeLabel).filter(Boolean),
@@ -931,7 +977,7 @@ function registerLabelTools(server: McpServer, client: DocmostClient): void {
         label_id: z.string().uuid(),
       },
     },
-    wrap(client, "write", async (args) => {
+    wrap(registry, "write", async (args, client) => {
       await client.request("/pages/labels/remove", {
         pageId: args.page_id,
         labelId: args.label_id,
@@ -941,7 +987,7 @@ function registerLabelTools(server: McpServer, client: DocmostClient): void {
   );
 }
 
-function registerMemberTools(server: McpServer, client: DocmostClient): void {
+function registerMemberTools(server: McpServer, registry: ClientRegistry): void {
   server.registerTool(
     "list_space_members",
     {
@@ -949,7 +995,7 @@ function registerMemberTools(server: McpServer, client: DocmostClient): void {
       annotations: hints("read"),
       inputSchema: { space_id: spaceId, limit, cursor },
     },
-    wrap(client, "read", async (args) =>
+    wrap(registry, "read", async (args, client) =>
       asItems(
         await client.request("/spaces/members", {
           spaceId: await client.resolveSpaceId(String(args.space_id)),
@@ -972,7 +1018,7 @@ function registerMemberTools(server: McpServer, client: DocmostClient): void {
         group_ids: z.array(z.string().uuid()).optional(),
       },
     },
-    wrap(client, "write", async (args) => {
+    wrap(registry, "write", async (args, client) => {
       const userIds = (args.user_ids as string[] | undefined) ?? [];
       const groupIds = (args.group_ids as string[] | undefined) ?? [];
       if (userIds.length === 0 && groupIds.length === 0) {
@@ -998,7 +1044,7 @@ function registerMemberTools(server: McpServer, client: DocmostClient): void {
         group_id: z.string().uuid().optional(),
       },
     },
-    wrap(client, "destructive", async (args) => {
+    wrap(registry, "destructive", async (args, client) => {
       if (Boolean(args.user_id) === Boolean(args.group_id)) {
         throw new Error("Provide exactly one of user_id or group_id");
       }
@@ -1023,7 +1069,7 @@ function registerMemberTools(server: McpServer, client: DocmostClient): void {
         group_id: z.string().uuid().optional(),
       },
     },
-    wrap(client, "write", async (args) => {
+    wrap(registry, "write", async (args, client) => {
       if (Boolean(args.user_id) === Boolean(args.group_id)) {
         throw new Error("Provide exactly one of user_id or group_id");
       }

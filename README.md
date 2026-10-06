@@ -131,6 +131,31 @@ The client URL is `https://mcp.example.com/<secret>/mcp`, or `https://mcp.exampl
 - `export_page`, `export_space` and `upload_attachment` are **not offered in HTTP mode**. They read or write files on the machine running the server, which for a shared server is not the caller's computer and holds the credentials.
 - Terminate TLS in a reverse proxy and publish the port on loopback only. Keep proxy access logs off for this site, or strip the path, because the path carries the secret.
 
+### Actors: one Docmost account per model
+
+A shared server normally writes everything as `DOCMOST_EMAIL`. To see in Docmost page history which model created or changed a page, define named actors, each with its own Docmost account:
+
+```bash
+DOCMOST_ACTORS=opus,sonnet,other
+DOCMOST_ACTOR_OPUS_EMAIL=opus@example.com
+DOCMOST_ACTOR_OPUS_PASSWORD=...
+DOCMOST_ACTOR_SONNET_EMAIL=sonnet@example.com
+DOCMOST_ACTOR_SONNET_PASSWORD=...
+DOCMOST_ACTOR_OTHER_EMAIL=other@example.com
+DOCMOST_ACTOR_OTHER_PASSWORD=...
+```
+
+Names are lowercase letters, digits and `-`; in variable names they are upper-cased and `-` becomes `_`. The server refuses to start if an actor lacks its email or password, and the message names the variable, never its value.
+
+With actors defined:
+
+- Every write or destructive tool requires an `actor` input. Its allowed values are the actor names, listed in the tool schema, so the agent sees them. A missing or unknown actor is rejected before anything is written.
+- The write runs in Docmost as that actor, with its own login and session cache (`session.<actor>.json` next to the default one).
+- Read tools have no `actor` input and use the default account (`DOCMOST_EMAIL`), so a read never fails because an actor lacks access to a space.
+- Without `DOCMOST_ACTORS`, nothing changes: no `actor` input, every call uses the default account. This also works in stdio mode.
+
+**Trust model: attribution, not authentication.** The server cannot verify which model is calling. Anyone with the URL can name any actor, so giving actors different Docmost rights is not a security boundary. Use the actors to record who wrote what; control access through the URL and the rights of the accounts as a group.
+
 ### Docker
 
 `Dockerfile` builds an HTTP-mode image that runs as the `node` user. `deploy/compose.example.yaml` runs it with a read-only root filesystem, the port on `127.0.0.1` only, and settings from a `.env` file:
