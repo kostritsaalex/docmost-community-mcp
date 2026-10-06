@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { requireBodyOperation, resolvePageIds } from "./guards.js";
+import { parseDoc, requireBodyOperation, resolvePageIds } from "./guards.js";
 
 const UUID = "01a10de8-20dd-71f0-96ed-1565f979f4e6";
 
@@ -56,4 +56,30 @@ test("a failing lookup surfaces its error", async () => {
     }),
     /Page not found for slugId nope/,
   );
+});
+
+const DOC = { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "x" }] }] };
+
+test("a doc body also needs operation", () => {
+  assert.throws(() => requireBodyOperation({ doc: DOC }), /operation is required when a body/);
+  assert.doesNotThrow(() => requireBodyOperation({ doc: DOC, operation: "replace" }));
+});
+
+test("markdown and doc together are rejected", () => {
+  assert.throws(
+    () => requireBodyOperation({ markdown: "x", doc: DOC, operation: "append" }),
+    /either markdown or doc, not both/,
+  );
+});
+
+test("parseDoc accepts the object and its JSON string", () => {
+  assert.deepEqual(parseDoc(DOC), DOC);
+  assert.deepEqual(parseDoc(JSON.stringify(DOC)), DOC);
+});
+
+test("parseDoc rejects bad JSON and non-doc objects", () => {
+  assert.throws(() => parseDoc("{not json"), /not valid JSON/);
+  assert.throws(() => parseDoc({ type: "paragraph" }), /type "doc"/);
+  assert.throws(() => parseDoc([DOC]), /type "doc"/);
+  assert.throws(() => parseDoc(42), /type "doc"/);
 });

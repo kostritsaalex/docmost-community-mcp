@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { ClientRegistry } from "./actors.js";
 import type { DocmostClient } from "./client.js";
 import { DocmostError, VersionError } from "./errors.js";
-import { requireBodyOperation, resolvePageIds } from "./guards.js";
+import { parseDoc, requireBodyOperation, resolvePageIds } from "./guards.js";
 import {
   asItems,
   errorResult,
@@ -23,6 +23,12 @@ const pageId = z.string().min(1).describe("Page UUID or slugId (a slugId is reso
 const spaceId = z.string().min(1).describe("Space UUID or slug");
 const limit = z.number().int().min(1).max(100).optional().describe("Page size, 1-100");
 const cursor = z.string().optional().describe("Pagination cursor from meta.nextCursor");
+const docInput = z
+  .union([z.object({ type: z.literal("doc") }).passthrough(), z.string()])
+  .optional()
+  .describe(
+    "Page body as a ProseMirror document, exactly as get_page with format=json returns it. Stored as is, with no conversion: use it to change an existing page without losing tables or formatting. Not together with markdown.",
+  );
 
 type ToolKind = "read" | "write" | "destructive";
 
@@ -199,28 +205,36 @@ function registerPageTools(
   server.registerTool(
     "create_page",
     {
-      description: "Create a page in a space. Body is Markdown and is persisted in place (Docmost v0.71+). Can nest under a parent.",
+      description: "Create a page in a space. Body as markdown (converted by the server, v0.71+) or as doc (ProseMirror JSON, stored as is). Can nest under a parent.",
       annotations: hints("write"),
       inputSchema: {
         space_id: spaceId,
         title: z.string().min(1).describe("Page title"),
-        markdown: z.string().optional().describe("Page body as Markdown"),
-        parent_page_id: z.string().optional().describe("Parent page UUID to nest under"),
+        markdown: z.string().optional().describe("Page body as Markdown. Not together with doc"),
+        doc: docInput,
+        parent_page_id: z.string().optional().describe("Parent page UUID or slugId to nest under"),
         icon: z.string().optional().describe("Page icon, usually an emoji"),
       },
     },
     wrap(registry, "write", async (args, client) => {
+      if (args.markdown && args.doc) {
+        // Same rule as update_page; create needs no operation.
+        requireBodyOperation({ markdown: args.markdown, doc: args.doc, operation: "replace" });
+      }
       await client.assertWritable();
       const resolvedSpaceId = await client.resolveSpaceId(String(args.space_id));
       const markdown = args.markdown as string | undefined;
+      const doc = args.doc !== undefined && args.doc !== null && args.doc !== "" ? parseDoc(args.doc) : undefined;
       const created = (await client.request("/pages/create", {
         spaceId: resolvedSpaceId,
         title: args.title,
         parentPageId: args.parent_page_id,
         icon: args.icon,
-        ...(markdown
-          ? { content: markdown, format: "markdown" }
-          : {}),
+        ...(doc
+          ? { content: doc, format: "json" }
+          : markdown
+            ? { content: markdown, format: "markdown" }
+            : {}),
       })) as Json;
 
       if (markdown) {
@@ -249,35 +263,36 @@ function registerPageTools(
     "update_page",
     {
       description:
-        "Update a page title, icon, and/or Markdown body in place. Body writes use the server converter (v0.71+). With markdown, operation is required: append or prepend adds to the page, replace sends the whole body.",
+        "Update a page title, icon, and/or body in place. Body as markdown (converted by the server, v0.71+) or as doc (ProseMirror JSON, stored as is; the lossless way to change an existing page: read with get_page format=json, edit, send back). With a body, operation is required: append or prepend adds to the page, replace sends the whole body.",
       annotations: hints("write"),
       inputSchema: {
         page_id: pageId,
         title: z.string().optional(),
         icon: z.string().optional(),
-        markdown: z.string().optional().describe("New Markdown body"),
+        markdown: z.string().optional().describe("New body as Markdown. Not together with doc"),
+        doc: docInput,
         operation: z
           .enum(["replace", "append", "prepend"])
           .optional()
-          .describe("How to apply markdown; required when markdown is given. No default"),
+          .describe("How to apply the body; required when markdown or doc is given. No default"),
       },
     },
     wrap(registry, "write", async (args, client) => {
       requireBodyOperation(args);
-      if (args.markdown) {
+      const doc = args.doc !== undefined && args.doc !== null && args.doc !== "" ? parseDoc(args.doc) : undefined;
+      if (args.markdown || doc) {
         await client.assertWritable();
       }
+      const body = doc
+        ? { content: doc, format: "json", operation: args.operation }
+        : args.markdown
+          ? { content: args.markdown, format: "markdown", operation: args.operation }
+          : {};
       const updated = await client.request("/pages/update", {
         pageId: args.page_id,
         title: args.title,
         icon: args.icon,
-        ...(args.markdown
-          ? {
-              content: args.markdown,
-              format: "markdown",
-              operation: args.operation,
-            }
-          : {}),
+        ...body,
       });
       if (args.markdown) {
         await client.confirmMarkdownWrite(updated, String(args.markdown));
@@ -285,6 +300,7 @@ function registerPageTools(
       return pageSummary(updated);
     }),
   );
+
 
   server.registerTool(
     "list_pages",

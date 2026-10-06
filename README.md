@@ -179,6 +179,10 @@ mcp.example.com {
 - `update_page` with `markdown` requires `operation` (`replace`, `append` or `prepend`). There is no default: a missing operation used to mean `replace`, which silently overwrote the whole page. Title or icon changes without a body need no operation. The rule applies in stdio and HTTP mode.
 - Every tool that takes a page id (`page_id`, `parent_page_id`, `after_page_id`) accepts a UUID or a slugId. A slugId is resolved to the UUID with one `/pages/info` call before the endpoint is called, because some Docmost endpoints answer a slugId with a 500 or a misleading 400.
 
+## Lossless writes (`doc`)
+
+`create_page` and `update_page` accept the body either as `markdown` or as `doc`, a ProseMirror document exactly as `get_page` with `format: "json"` returns it. A `doc` is sent to Docmost with `format: "json"` and stored as is, with no Markdown conversion, so tables, links and formatting survive. To change an existing page: read it with `get_page` `format: "json"`, edit the `content` object, send it back as `doc` with `operation: "replace"`. `markdown` and `doc` cannot be combined; `operation` is required with either. A JSON string in `doc` is parsed first. Docmost validates the document and rejects a malformed one with 400.
+
 ## Design notes
 
 - **stdio by default**, with an optional HTTP mode (Streamable HTTP and legacy SSE) for shared hosting.

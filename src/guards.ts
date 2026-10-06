@@ -14,17 +14,45 @@ export function isUuid(value: string): boolean {
 /**
  * A body write must name how it applies: a missing operation would silently
  * replace the whole page. Title or icon changes without a body need none.
+ * Markdown and a ProseMirror doc cannot be sent together.
  */
 export function requireBodyOperation(args: Record<string, unknown>): void {
-  if (!args.markdown) {
+  const hasMarkdown = Boolean(args.markdown);
+  const hasDoc = args.doc !== undefined && args.doc !== null && args.doc !== "";
+  if (hasMarkdown && hasDoc) {
+    throw new InputError("Send either markdown or doc, not both. Nothing was written.");
+  }
+  if (!hasMarkdown && !hasDoc) {
     return;
   }
   if (!args.operation) {
     throw new InputError(
-      `operation is required when markdown is given: one of ${BODY_OPERATIONS.join(", ")}. ` +
+      `operation is required when a body (markdown or doc) is given: one of ${BODY_OPERATIONS.join(", ")}. ` +
         "Use append or prepend to add to a page; replace sends the whole body. Nothing was written.",
     );
   }
+}
+
+/**
+ * A ProseMirror document as get_page with format=json returns it. Accepts the
+ * object or the same object serialised as a JSON string. Docmost validates the
+ * document itself and rejects a malformed one with 400.
+ */
+export function parseDoc(value: unknown): Record<string, unknown> {
+  let doc = value;
+  if (typeof doc === "string") {
+    try {
+      doc = JSON.parse(doc);
+    } catch {
+      throw new InputError("doc is not valid JSON. Nothing was written.");
+    }
+  }
+  if (!doc || typeof doc !== "object" || Array.isArray(doc) || (doc as Record<string, unknown>).type !== "doc") {
+    throw new InputError(
+      'doc must be a ProseMirror document object with type "doc", as get_page with format=json returns it. Nothing was written.',
+    );
+  }
+  return doc as Record<string, unknown>;
 }
 
 /**
