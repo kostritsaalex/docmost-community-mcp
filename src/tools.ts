@@ -2,9 +2,10 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { ClientRegistry } from "./actors.js";
 import type { DocmostClient } from "./client.js";
-import { DocmostError, VersionError } from "./errors.js";
+import { DocmostError, InputError, VersionError } from "./errors.js";
 import { validateDoc } from "./doc-schema.js";
 import { parseDoc, requireBodyOperation, resolvePageIds } from "./guards.js";
+import { findSection, hashSection, outline, skeleton, spliceSection, type PmNode } from "./sections.js";
 import {
   asItems,
   errorResult,
@@ -128,6 +129,32 @@ export function registerTools(
   registerAttachmentTools(target, registry, localFiles);
   registerLabelTools(target, registry);
   registerMemberTools(target, registry);
+}
+
+const sectionLevel = z.number().int().min(1).max(6).optional().describe("Heading level, to pick among identical headings");
+const sectionOccurrence = z
+  .number()
+  .int()
+  .min(1)
+  .optional()
+  .describe("1-based position among identical headings, when level is not enough");
+const READ_BACK_ATTEMPTS = 10;
+const READ_BACK_DELAY_MS = 500;
+
+function sectionOptions(args: Record<string, unknown>): { level?: number; occurrence?: number } {
+  return {
+    level: typeof args.level === "number" ? args.level : undefined,
+    occurrence: typeof args.occurrence === "number" ? args.occurrence : undefined,
+  };
+}
+
+async function readJsonBody(client: DocmostClient, pageIdValue: string): Promise<{ page: Json; doc: PmNode }> {
+  const page = (await client.request("/pages/info", { pageId: pageIdValue, format: "json" })) as Json;
+  const content = page.content as PmNode | undefined;
+  if (!content || typeof content !== "object" || content.type !== "doc") {
+    throw new DocmostError("The page has no ProseMirror body to work on");
+  }
+  return { page, doc: content };
 }
 
 function registerPageTools(
@@ -299,6 +326,116 @@ function registerPageTools(
         await client.confirmMarkdownWrite(updated, String(args.markdown));
       }
       return pageSummary(updated);
+    }),
+  );
+
+  server.registerTool(
+    "get_section",
+    {
+      description:
+        "Read one section of a page as ProseMirror JSON, or the page outline. A section is a top-level heading and the top-level nodes after it, up to the next heading of the same or a higher level. Without heading: the outline (headings with level, position and section size). With heading: the section body as doc and its hash, for replace_section. Use this instead of get_page on large pages.",
+      annotations: hints("read"),
+      inputSchema: {
+        page_id: pageId,
+        heading: z.string().optional().describe("Exact heading text (compared after trimming). Omit for the outline"),
+        level: sectionLevel,
+        occurrence: sectionOccurrence,
+      },
+    },
+    wrap(registry, "read", async (args, client) => {
+      const { page, doc } = await readJsonBody(client, String(args.page_id));
+      if (!args.heading) {
+        return { ...pageSummary(page), outline: outline(doc) };
+      }
+      const section = findSection(doc, String(args.heading), sectionOptions(args));
+      return {
+        ...pageSummary(page),
+        heading: section.heading,
+        level: section.level,
+        index: section.index,
+        hash: section.hash,
+        doc: { type: "doc", content: section.slice.slice(1) },
+      };
+    }),
+  );
+
+  server.registerTool(
+    "replace_section",
+    {
+      description:
+        "Replace the body of one section (the nodes under a heading, the heading itself kept) without sending the rest of the page. Read the section first with get_section and pass its hash as expected_hash; if the section changed since, nothing is written. The new body is a ProseMirror doc whose content is the section's new nodes; it may contain lower-level subheadings, not headings of the section's level or higher. The gateway rewrites the stored page with only that section changed, checks it against the Docmost schema, and reads it back to confirm that everything outside the section is unchanged.",
+      annotations: hints("write"),
+      inputSchema: {
+        page_id: pageId,
+        heading: z.string().min(1).describe("Exact heading text of the section (compared after trimming)"),
+        level: sectionLevel,
+        occurrence: sectionOccurrence,
+        doc: z
+          .union([z.object({ type: z.literal("doc") }).passthrough(), z.string()])
+          .describe("New section body as a ProseMirror doc: content holds the nodes under the heading. An empty content empties the section"),
+        expected_hash: z
+          .string()
+          .regex(/^[0-9a-f]{64}$/)
+          .describe("hash returned by get_section for this section"),
+      },
+    },
+    wrap(registry, "write", async (args, client) => {
+      const body = ((parseDoc(args.doc).content as PmNode[] | undefined) ?? []);
+      await client.assertWritable();
+      const pageIdValue = String(args.page_id);
+      const { doc } = await readJsonBody(client, pageIdValue);
+      const section = findSection(doc, String(args.heading), sectionOptions(args));
+      for (const node of body) {
+        if (node.type === "footnotes") {
+          throw new InputError("The new section body cannot hold the footnotes block. Nothing was written.");
+        }
+        if (node.type === "heading" && Number(node.attrs?.level ?? 1) <= section.level) {
+          throw new InputError(
+            `The new body holds a heading of level ${Number(node.attrs?.level ?? 1)}, which would end the section (level ${section.level}). Use lower-level subheadings only. Nothing was written.`,
+          );
+        }
+      }
+      if (section.hash !== args.expected_hash) {
+        throw new InputError(
+          "The section changed since it was read (hash mismatch). Read it again with get_section and redo the change. Nothing was written.",
+        );
+      }
+      const next = validateDoc(spliceSection(doc, section, body)) as PmNode;
+      await client.request("/pages/update", { pageId: pageIdValue, content: next, format: "json", operation: "replace" });
+
+      // Docmost applies the body through its collaboration layer, so the read-back may lag.
+      const content = doc.content ?? [];
+      const bodyStart = section.index + 1;
+      const expected = JSON.stringify([
+        skeleton(content.slice(0, bodyStart)),
+        skeleton(body),
+        skeleton(content.slice(section.end)),
+      ]);
+      for (let attempt = 0; attempt < READ_BACK_ATTEMPTS; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, READ_BACK_DELAY_MS));
+        const after = await readJsonBody(client, pageIdValue);
+        const stored = after.doc.content ?? [];
+        const bodyEnd = bodyStart + body.length;
+        const seen = JSON.stringify([
+          skeleton(stored.slice(0, bodyStart)),
+          skeleton(stored.slice(bodyStart, bodyEnd)),
+          skeleton(stored.slice(bodyEnd)),
+        ]);
+        if (seen === expected) {
+          return {
+            ...pageSummary(after.page),
+            heading: section.heading,
+            level: section.level,
+            replacedNodes: section.nodes,
+            newNodes: body.length,
+            hash: hashSection(stored.slice(section.index, bodyEnd)),
+            verified: "text and nodes outside the section unchanged",
+          };
+        }
+      }
+      throw new DocmostError(
+        "The section was written, but the page read back did not match the expected result. Check the page and its history before writing again.",
+      );
     }),
   );
 

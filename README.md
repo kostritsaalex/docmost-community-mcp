@@ -196,6 +196,20 @@ node scripts/write-docmost-schema.mjs scripts/docmost-schema.json
 
 Keep `prosemirror-model` at the version Docmost uses (see its `pnpm-lock.yaml`; 1.25.11 for Docmost 0.96.0), so the check behaves exactly like Docmost's parser.
 
+## Section edits (`get_section`, `replace_section`)
+
+Docmost has no partial page update over REST, and a large page can be too big for an agent to read and resend whole. The gateway does the read-modify-write itself:
+
+1. `get_section` without `heading` returns the page outline: top-level headings with level, position and section size. With `heading` it returns that section's body as a ProseMirror `doc` and a `hash`.
+2. Edit the returned `doc`.
+3. `replace_section` with `heading`, the edited `doc`, `expected_hash` (the hash from step 1) and your `actor`.
+
+A section is a top-level heading and the top-level nodes after it, up to the next heading of the same or a higher level; the footnotes block is never part of one, and headings inside callouts, details or tables do not start sections. Headings are matched exactly after trimming; `level` and `occurrence` (1-based) pick among identical headings.
+
+Nothing is written when the heading is unknown or ambiguous, when the section changed since it was read (hash mismatch), when the new body holds a heading of the section's level or higher, or when the resulting page fails the Docmost schema check. After the write the gateway reads the page back and confirms that text and nodes outside the section are unchanged.
+
+The whole body is still sent to Docmost: an edit made in the browser to another part of the same page in the same moment can be lost; the hash protects the section itself. A page's first json write adds default attributes (`dir`, empty mark `attrs`) once, with no visible change; later writes are byte-stable (measured on Docmost 0.96.0, DCMCP-US0077).
+
 ## Design notes
 
 - **stdio by default**, with an optional HTTP mode (Streamable HTTP and legacy SSE) for shared hosting.
