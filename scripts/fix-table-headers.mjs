@@ -119,7 +119,10 @@ for (const item of PLAN) {
     const page = await readDoc(reader, item.page);
     const before = page.content;
     if (MODE === "backup") {
-      process.stdout.write(JSON.stringify({ id: item.page, title: page.title, updatedAt: page.updatedAt, content: before }) + "\n");
+      // Wait for the write: stdout to a pipe is asynchronous, and exiting early cuts the last line.
+      await new Promise((resolve) =>
+        process.stdout.write(JSON.stringify({ id: item.page, title: page.title, updatedAt: page.updatedAt, content: before }) + "\n", resolve),
+      );
       continue;
     }
     const fixed = repair(before, item.fixes);
@@ -157,4 +160,5 @@ for (const item of PLAN) {
   }
 }
 if (MODE !== "backup") console.log(`${PLAN.length - failed} of ${PLAN.length} pages ok (mode ${MODE})`);
-process.exit(failed ? 1 : 0);
+// exitCode, not process.exit(): let pending output drain first.
+process.exitCode = failed ? 1 : 0;
