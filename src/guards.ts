@@ -35,8 +35,8 @@ export function requireBodyOperation(args: Record<string, unknown>): void {
 
 /**
  * A ProseMirror document as get_page with format=json returns it. Accepts the
- * object or the same object serialised as a JSON string. Docmost validates the
- * document itself and rejects a malformed one with 400.
+ * object or the same object serialised as a JSON string. Only the outer shape is
+ * checked here; validateDoc (doc-schema.ts) checks it against the Docmost schema.
  */
 export function parseDoc(value: unknown): Record<string, unknown> {
   let doc = value;

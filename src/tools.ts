@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { ClientRegistry } from "./actors.js";
 import type { DocmostClient } from "./client.js";
 import { DocmostError, VersionError } from "./errors.js";
+import { validateDoc } from "./doc-schema.js";
 import { parseDoc, requireBodyOperation, resolvePageIds } from "./guards.js";
 import {
   asItems,
@@ -27,7 +28,7 @@ const docInput = z
   .union([z.object({ type: z.literal("doc") }).passthrough(), z.string()])
   .optional()
   .describe(
-    "Page body as a ProseMirror document, exactly as get_page with format=json returns it. Stored as is, with no conversion: use it to change an existing page without losing tables or formatting. Not together with markdown.",
+    "Page body as a ProseMirror document, exactly as get_page with format=json returns it. Checked against the Docmost schema, then stored as is, with no conversion: use it to change an existing page without losing tables or formatting. Not together with markdown.",
   );
 
 type ToolKind = "read" | "write" | "destructive";
@@ -224,7 +225,7 @@ function registerPageTools(
       await client.assertWritable();
       const resolvedSpaceId = await client.resolveSpaceId(String(args.space_id));
       const markdown = args.markdown as string | undefined;
-      const doc = args.doc !== undefined && args.doc !== null && args.doc !== "" ? parseDoc(args.doc) : undefined;
+      const doc = args.doc !== undefined && args.doc !== null && args.doc !== "" ? validateDoc(parseDoc(args.doc)) : undefined;
       const created = (await client.request("/pages/create", {
         spaceId: resolvedSpaceId,
         title: args.title,
@@ -279,7 +280,7 @@ function registerPageTools(
     },
     wrap(registry, "write", async (args, client) => {
       requireBodyOperation(args);
-      const doc = args.doc !== undefined && args.doc !== null && args.doc !== "" ? parseDoc(args.doc) : undefined;
+      const doc = args.doc !== undefined && args.doc !== null && args.doc !== "" ? validateDoc(parseDoc(args.doc)) : undefined;
       if (args.markdown || doc) {
         await client.assertWritable();
       }

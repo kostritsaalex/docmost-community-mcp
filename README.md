@@ -181,7 +181,20 @@ mcp.example.com {
 
 ## Lossless writes (`doc`)
 
-`create_page` and `update_page` accept the body either as `markdown` or as `doc`, a ProseMirror document exactly as `get_page` with `format: "json"` returns it. A `doc` is sent to Docmost with `format: "json"` and stored as is, with no Markdown conversion, so tables, links and formatting survive. To change an existing page: read it with `get_page` `format: "json"`, edit the `content` object, send it back as `doc` with `operation: "replace"`. `markdown` and `doc` cannot be combined; `operation` is required with either. A JSON string in `doc` is parsed first. Docmost validates the document and rejects a malformed one with 400.
+`create_page` and `update_page` accept the body either as `markdown` or as `doc`, a ProseMirror document exactly as `get_page` with `format: "json"` returns it. A `doc` is sent to Docmost with `format: "json"` and stored as is, with no Markdown conversion, so tables, links and formatting survive. To change an existing page: read it with `get_page` `format: "json"`, edit the `content` object, send it back as `doc` with `operation: "replace"`. `markdown` and `doc` cannot be combined; `operation` is required with either. A JSON string in `doc` is parsed first.
+
+Every `doc` is checked against Docmost's own ProseMirror schema before it is sent: unknown node or mark types, missing required attributes and content in the wrong place (text directly in `doc`, a cell outside a table row) are rejected with nothing written. Docmost itself does not do this: its json check never calls `check()` and silently unwraps unknown node types, so a malformed `doc` would be stored and the page damaged without an error (found on Docmost 0.96.0).
+
+The schema lives in `src/docmost-schema.ts`, generated from a running Docmost. After a Docmost upgrade, regenerate it:
+
+```bash
+# on the Docmost host, from the folder with its compose file (service name may differ)
+docker compose exec -T -w /app/apps/server docmost node - < dump-docmost-schema.cjs > docmost-schema.json
+# in this repository, with the dump copied to scripts/ (ignored by git)
+node scripts/write-docmost-schema.mjs scripts/docmost-schema.json
+```
+
+Keep `prosemirror-model` at the version Docmost uses (see its `pnpm-lock.yaml`; 1.25.11 for Docmost 0.96.0), so the check behaves exactly like Docmost's parser.
 
 ## Design notes
 
