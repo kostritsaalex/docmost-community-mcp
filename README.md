@@ -1,33 +1,42 @@
 # docmost-community-mcp
 
-Model Context Protocol server for self-hosted [Docmost](https://docmost.com) **Community / Open Source Edition**.
+Model Context Protocol server for self-hosted [Docmost](https://docmost.com) **Community / Open Source Edition**, with a shared HTTP mode, a Docmost account per model for writes, and lossless page writes.
 
-Source: [github.com/dilruwanm/docmost-community-mcp](https://github.com/dilruwanm/docmost-community-mcp)
+This repository is a fork of [dilruwanm/docmost-community-mcp](https://github.com/dilruwanm/docmost-community-mcp), maintained on its own since 2026-10-05. Upstream is kept as a git remote for reference only, and changes made here are not sent upstream. This fork is not published to npm.
 
-Official Docmost MCP and API keys are Enterprise-only. This server talks to the same internal HTTP API the Docmost web app uses, so you can search, read, write, and organize a CE wiki from Cursor, Claude, or any MCP client.
+Official Docmost MCP and API keys are Enterprise-only. This server talks to the same internal HTTP API the Docmost web app uses, so you can search, read, write and organize a Community wiki from any MCP client.
 
-Requires **Docmost v0.71+** for Markdown body writes. Latest verified target is **v0.95.0**.
+## What this fork adds
+
+| Area | What | Section |
+|---|---|---|
+| Shared hosting | Streamable HTTP and legacy SSE from one process, behind a secret URL path | HTTP mode |
+| Attribution | Each write runs under the Docmost account of the model named in `actor` | Actors |
+| Safer writes | `operation` is required with any body; slugIds are resolved to UUIDs | Safer page writes |
+| Lossless writes | `doc` takes ProseMirror JSON, checked against the Docmost schema before sending | Lossless writes |
+| Section edits | `get_section` and `replace_section`, guarded by a hash | Section edits |
+
+## Compatibility
+
+- Page body writes need **Docmost v0.71+**; the server checks the version at runtime.
+- Verified against **Docmost 0.96.0**. The schema used to check `doc` writes (`src/docmost-schema.ts`) is generated from that version. Regenerate it after every Docmost upgrade, as described in "Lossless writes".
 
 ## Install
 
-```bash
-npx -y docmost-community-mcp
-```
-
-From source:
+Install from this repository. `npx docmost-community-mcp` fetches whatever npm holds under that name, which is not built from this code.
 
 ```bash
-git clone https://github.com/dilruwanm/docmost-community-mcp.git
+git clone https://github.com/kostritsaalex/docmost-community-mcp.git
 cd docmost-community-mcp
 npm install
 npm run build
 ```
 
-## What you get
+For a shared server, build the Docker image from a pinned commit (see "Docker").
 
-Official Enterprise MCP tool names, plus Community extras those docs omit.
+## Tools
 
-**Pages:** `search_pages`, `get_page`, `create_page`, `update_page`, `list_pages`, `list_child_pages`, `duplicate_page`, `copy_page_to_space`, `move_page`, `move_page_to_space`, `delete_page`, `restore_page`, `list_trash`, `get_page_history`, `get_history_version`, `get_breadcrumbs`, `get_backlinks`, `export_page`
+**Pages:** `search_pages`, `get_page`, `create_page`, `update_page`, `get_section`, `replace_section`, `list_pages`, `list_child_pages`, `duplicate_page`, `copy_page_to_space`, `move_page`, `move_page_to_space`, `delete_page`, `restore_page`, `list_trash`, `get_page_history`, `get_history_version`, `get_breadcrumbs`, `get_backlinks`, `export_page`
 
 **Spaces:** `list_spaces`, `get_space`, `create_space`, `update_space`, `delete_space`, `export_space`
 
@@ -37,7 +46,9 @@ Official Enterprise MCP tool names, plus Community extras those docs omit.
 
 **Files / labels / access:** `upload_attachment`, `get_attachment_info`, `list_page_labels`, `add_page_labels`, `remove_page_label`, `list_space_members`, `add_space_members`, `remove_space_member`, `update_space_member_role`
 
-Page and comment bodies are **Markdown**. Updates go through `POST /api/pages/update` with `format: "markdown"` so Docmost converts and applies the change in place. The server does not open a Yjs socket or invent its own TipTap schema.
+In HTTP mode `export_page`, `export_space` and `upload_attachment` are not registered (see "Security model").
+
+**Page bodies.** `create_page` and `update_page` take the body either as `markdown`, which Docmost converts (`format: "markdown"`), or as `doc`, ProseMirror JSON stored without any conversion (`format: "json"`). `get_page` returns Markdown by default and the stored document with `format: "json"`. A Markdown round trip is lossy: table header rows, internal links, colours and column widths do not survive it. Change existing pages through `doc` or the section tools, never by rewriting a Markdown read. Comment bodies are Markdown. The server does not open a Yjs socket.
 
 ## Environment
 
@@ -53,27 +64,9 @@ Email/password is preferred. The JWT is cached under `~/.docmost-community-mcp/s
 
 Use a dedicated Docmost user. Do not commit credentials.
 
-## Cursor
+## Local stdio clients
 
-Add to `.cursor/mcp.json` or `~/.cursor/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "docmost": {
-      "command": "npx",
-      "args": ["-y", "docmost-community-mcp"],
-      "env": {
-        "DOCMOST_URL": "https://docs.example.com",
-        "DOCMOST_EMAIL": "you@example.com",
-        "DOCMOST_PASSWORD": "your-password"
-      }
-    }
-  }
-}
-```
-
-From a local clone:
+On a single machine, run the built server over stdio. In an `mcpServers` block (Cursor, Claude Desktop and similar):
 
 ```json
 {
@@ -91,13 +84,13 @@ From a local clone:
 }
 ```
 
-## Claude Desktop / Claude Code
-
-Same `mcpServers` block as above. Claude Code:
+Claude Code:
 
 ```bash
-claude mcp add docmost --env DOCMOST_URL=https://docs.example.com --env DOCMOST_EMAIL=you@example.com --env DOCMOST_PASSWORD=secret -- npx -y docmost-community-mcp
+claude mcp add docmost --env DOCMOST_URL=https://docs.example.com --env DOCMOST_EMAIL=you@example.com --env DOCMOST_PASSWORD=secret -- node /absolute/path/to/docmost-community-mcp/dist/index.js
 ```
+
+A stdio entry keeps the Docmost password in the client config. With a shared server, clients hold only its URL (see "HTTP mode").
 
 ## HTTP mode (remote hosting)
 
